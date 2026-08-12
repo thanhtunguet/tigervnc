@@ -113,9 +113,17 @@ AuthDialog::AuthDialog(bool secure_, bool needsUser, bool needsPassword)
     } else {
       keepPasswdCheckbox = nullptr;
     }
+
+    /* "Remember password" checkbox — stores in OS keychain */
+    rememberPasswdCheckbox = new Fl_Check_Button(LBLRIGHT(x, y,
+                                                          CHECK_MIN_WIDTH,
+                                                          CHECK_HEIGHT,
+                                                          _("Remember password")));
+    y += CHECK_HEIGHT + INNER_MARGIN;
   } else {
     passwd = nullptr;
     keepPasswdCheckbox = nullptr;
+    rememberPasswdCheckbox = nullptr;
   }
 
   x = w() - OUTER_MARGIN;
@@ -169,6 +177,13 @@ bool AuthDialog::getKeepPassword()
 {
   if (keepPasswdCheckbox)
     return keepPasswdCheckbox->value();
+  return false;
+}
+
+bool AuthDialog::getRememberPassword()
+{
+  if (rememberPasswdCheckbox)
+    return rememberPasswdCheckbox->value();
   return false;
 }
 

@@ -68,6 +68,7 @@
 #include "PlatformPixelBuffer.h"
 #include "parameters.h"
 #include "vncviewer.h"
+#include "CredentialManager.h"
 
 std::string CConn::savedUsername;
 std::string CConn::savedPassword;
@@ -355,6 +356,28 @@ void CConn::getUserPasswd(bool secure, std::string *user,
     return;
   }
 
+  // Try to load credentials from OS keychain for this server
+  {
+    std::string keychainUser, keychainPass;
+    if (CredentialManager::loadCredentials(serverHost, serverPort,
+                                           keychainUser, keychainPass)) {
+      if (!keychainPass.empty()) {
+        if (user && !keychainUser.empty()) {
+          *user = keychainUser;
+          *password = keychainPass;
+          // Also update saved credentials for reconnect
+          savedUsername = keychainUser;
+          savedPassword = keychainPass;
+          return;
+        } else if (!user) {
+          *password = keychainPass;
+          savedPassword = keychainPass;
+          return;
+        }
+      }
+    }
+  }
+
   if (user && !savedUsername.empty() && !savedPassword.empty()) {
     *user = savedUsername;
     *password = savedPassword;
@@ -398,6 +421,8 @@ void CConn::getUserPasswd(bool secure, std::string *user,
     else
       keepPasswd = false;
 
+    bool rememberPasswd = d.getRememberPassword();
+
     if (user) {
       *user = d.getUser();
       if (keepPasswd)
@@ -406,6 +431,16 @@ void CConn::getUserPasswd(bool secure, std::string *user,
     *password = d.getPassword();
     if (keepPasswd)
       savedPassword = d.getPassword();
+
+    // Save to OS keychain if user requested it
+    if (rememberPasswd) {
+      std::string usernameStr = user ? d.getUser() : "";
+      std::string passwordStr = d.getPassword();
+      if (!CredentialManager::saveCredentials(serverHost, serverPort,
+                                               usernameStr, passwordStr)) {
+        vlog.info(_("Failed to save credentials to keychain"));
+      }
+    }
   }
 
   if (ret_val != 1)

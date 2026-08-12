@@ -41,12 +41,14 @@ public:
   std::string getUser();
   std::string getPassword();
   bool getKeepPassword();
+  bool getRememberPassword();
 
 private:
   static void button_cb(Fl_Widget *w, long val);
 
 private:
   Fl_Check_Button* keepPasswdCheckbox;
+  Fl_Check_Button* rememberPasswdCheckbox;
   Fl_Input* username;
   Fl_Secret_Input* passwd;
 
