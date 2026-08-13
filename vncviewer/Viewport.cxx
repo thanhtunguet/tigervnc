@@ -795,7 +795,7 @@ void Viewport::handleKeyPress(int systemKeyCode,
       case XK_Return:
         if (window()->fullscreen_active()) {
           fullScreen.setParam(false);
-          window()->fullscreen_off();
+          ((DesktopWindow*)window())->fullscreen_off();
         } else {
           fullScreen.setParam(true);
           ((DesktopWindow*)window())->fullscreen_on();
@@ -998,7 +998,7 @@ void Viewport::popupContextMenu()
     break;
   case ID_FULLSCREEN:
     if (window()->fullscreen_active())
-      window()->fullscreen_off();
+      ((DesktopWindow*)window())->fullscreen_off();
     else
       ((DesktopWindow*)window())->fullscreen_on();
     break;

@@ -193,10 +193,12 @@ DesktopWindow::DesktopWindow(int w, int h, CConn* cc_)
   if (fullScreen) {
     // Hack: Window managers seem to be rather crappy at respecting
     // fullscreen hints on initial windows. So on X11 we'll have to
-    // wait until after we've been mapped.
-#if defined(WIN32) || defined(__APPLE__)
+    // wait until after we've been mapped. On macOS, native fullscreen
+    // needs a real NSWindow to toggle, which only exists after show(),
+    // so that case is handled below instead.
+#if defined(WIN32)
     fullscreen_on();
-#else
+#elif !defined(__APPLE__)
     delayedFullscreen = true;
 #endif
   }
@@ -204,8 +206,13 @@ DesktopWindow::DesktopWindow(int w, int h, CConn* cc_)
   show();
 
 #ifdef __APPLE__
-  // FLTK does its own full screen, so disable the system one
-  cocoa_prevent_native_fullscreen(this);
+  // Enable native fullscreen support on macOS
+  cocoa_enable_native_fullscreen(this);
+
+  // Trigger native fullscreen if requested. This must happen after
+  // show(), as fl_xid() is only valid once the window has been shown.
+  if (fullScreen)
+    cocoa_toggle_native_fullscreen(this);
 #endif
 
   // Full screen events are not sent out for a hidden window,
@@ -1083,8 +1090,27 @@ void DesktopWindow::fullscreen_on()
 
   fullscreen_screens(top, bottom, left, right);
 
+#ifdef __APPLE__
+  // On macOS, use only native fullscreen (skip FLTK's fullscreen to avoid conflicts)
+  if (!cocoa_is_native_fullscreen(this))
+    cocoa_toggle_native_fullscreen(this);
+#else
   if (!fullscreen_active())
     fullscreen();
+#endif
+}
+
+void DesktopWindow::fullscreen_off()
+{
+#ifdef __APPLE__
+  // Native fullscreen was used to enter, so it must be used to leave
+  // as well. Fl_Window::fullscreen_off() only undoes FLTK's own
+  // software fullscreen and knows nothing about the native state.
+  if (cocoa_is_native_fullscreen(this))
+    cocoa_toggle_native_fullscreen(this);
+#else
+  Fl_Window::fullscreen_off();
+#endif
 }
 
 bool DesktopWindow::hasFocus()

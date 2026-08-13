@@ -33,6 +33,8 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <errno.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #endif
 
 #include <assert.h>
@@ -80,6 +82,11 @@ static core::BoolParameter
 static core::BoolParameter
   UseIPv6("UseIPv6",
           _("Use IPv6 for incoming and outgoing connections"), true);
+
+// Connection timeout in seconds - if server doesn't respond within this time, abort
+static core::IntParameter
+  ConnectTimeout("ConnectTimeout",
+          _("Timeout in seconds for establishing a connection to a VNC server"), 3);
 
 /* Tunnelling support. */
 int network::findFreeTcpPort (void)
@@ -273,18 +280,154 @@ TcpSocket::TcpSocket(const char *host, int port)
       throw core::socket_error(_("Failed to create socket"), err);
     }
 
+    // Set socket to non-blocking mode for connect with timeout
+#ifndef WIN32
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+      err = errorNumber;
+      closesocket(sock);
+      sock = -1;
+      freeaddrinfo(ai);
+      throw core::socket_error(_("Failed to set socket non-blocking"), err);
+    }
+#else
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+#endif
+
   /* Attempt to connect to the remote host */
     while ((result = connect(sock, &sa.u.sa, salen)) == -1) {
       err = errorNumber;
 #ifndef WIN32
       if (err == EINTR)
         continue;
+      if (err == EINPROGRESS) {
+        // Connection in progress - wait with timeout
+        fd_set write_fds, error_fds;
+        struct timeval timeout;
+
+        FD_ZERO(&write_fds);
+        FD_ZERO(&error_fds);
+        FD_SET(sock, &write_fds);
+        FD_SET(sock, &error_fds);
+
+        timeout.tv_sec = ConnectTimeout;
+        timeout.tv_usec = 0;
+
+        int select_result = select(sock + 1, nullptr, &write_fds, &error_fds, &timeout);
+
+        if (select_result == 0) {
+          // Timeout
+          vlog.debug("Connection timeout to %s port %d", ntop, port);
+          closesocket(sock);
+          sock = -1;
+          err = ETIMEDOUT;
+          break;
+        } else if (select_result < 0) {
+          // select() error
+          err = errorNumber;
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        // Socket is ready - check for connection errors
+        int socket_error = 0;
+        socklen_t optlen = sizeof(socket_error);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &socket_error, &optlen) < 0) {
+          err = errorNumber;
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        if (socket_error != 0) {
+          // Connection failed
+          err = socket_error;
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        // Connection successful
+        result = 0;
+        break;
+      }
+#else
+      if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS) {
+        // Connection in progress - wait with timeout
+        fd_set write_fds, error_fds;
+        struct timeval timeout;
+
+        FD_ZERO(&write_fds);
+        FD_ZERO(&error_fds);
+        FD_SET(sock, &write_fds);
+        FD_SET(sock, &error_fds);
+
+        timeout.tv_sec = ConnectTimeout;
+        timeout.tv_usec = 0;
+
+        int select_result = select(sock + 1, nullptr, &write_fds, &error_fds, &timeout);
+
+        if (select_result == 0) {
+          // Timeout
+          vlog.debug("Connection timeout to %s port %d", ntop, port);
+          closesocket(sock);
+          sock = -1;
+          err = WSAETIMEDOUT;
+          break;
+        } else if (select_result < 0) {
+          // select() error
+          err = WSAGetLastError();
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        // Socket is ready - check for connection errors
+        int socket_error = 0;
+        int optlen = sizeof(socket_error);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&socket_error, &optlen) < 0) {
+          err = WSAGetLastError();
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        if (socket_error != 0) {
+          // Connection failed
+          err = socket_error;
+          closesocket(sock);
+          sock = -1;
+          break;
+        }
+
+        // Connection successful
+        result = 0;
+        break;
+      }
 #endif
       vlog.debug("Failed to connect to address %s port %d: %d",
                  ntop, port, err);
       closesocket(sock);
       sock = -1;
       break;
+    }
+
+    // Set socket back to blocking mode (rest of code expects blocking mode)
+    if (sock != -1) {
+#ifndef WIN32
+      if (fcntl(sock, F_SETFL, flags) == -1) {
+        err = errorNumber;
+        closesocket(sock);
+        sock = -1;
+        freeaddrinfo(ai);
+        throw core::socket_error(_("Failed to restore socket mode"), err);
+      }
+#else
+      u_long mode_off = 0;
+      ioctlsocket(sock, FIONBIO, &mode_off);
+#endif
     }
 
     if (result == 0)
@@ -297,6 +440,14 @@ TcpSocket::TcpSocket(const char *host, int port)
     if (err == 0)
       throw std::runtime_error(
         _("No useful address found for hostname"));
+    else if (err == ETIMEDOUT
+#ifndef WIN32
+             )
+#else
+             || err == WSAETIMEDOUT)
+#endif
+      throw std::runtime_error(
+        core::format(_("Connection timed out after %d seconds"), (int)ConnectTimeout));
     else
       throw core::socket_error(_("Failed to connect to host"), err);
   }

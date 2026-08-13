@@ -81,6 +81,7 @@ public:
   int handle(int event) override;
 
   void fullscreen_on();
+  void fullscreen_off();
 
   // Grab keyboard events from desktop environment
   void grabKeyboard();

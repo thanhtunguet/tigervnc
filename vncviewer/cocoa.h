@@ -22,6 +22,9 @@
 class Fl_Window;
 
 void cocoa_prevent_native_fullscreen(Fl_Window *win);
+void cocoa_enable_native_fullscreen(Fl_Window *win);
+void cocoa_toggle_native_fullscreen(Fl_Window *win);
+bool cocoa_is_native_fullscreen(Fl_Window *win);
 
 bool cocoa_is_trusted(bool prompt=false);
 

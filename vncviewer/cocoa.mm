@@ -23,6 +23,9 @@
 #include <assert.h>
 #include <dlfcn.h>
 
+#include <set>
+
+#include <FL/Enumerations.H>
 #include <FL/Fl_Window.H>
 #include <FL/x.H>
 
@@ -34,6 +37,89 @@
 static CFMachPortRef event_tap;
 static CFRunLoopSourceRef tap_source;
 
+// NSWindows currently animating into or out of native fullscreen.
+// toggleFullScreen: called again on a window while it is still
+// transitioning will wedge AppKit's fullscreen state machine and
+// hang the whole application, so we track this explicitly rather
+// than relying on styleMask (which only updates once the animation
+// has finished).
+static std::set<NSWindow*> fullscreenTransitioning;
+
+static void cocoaTrackFullscreenTransitions(Fl_Window *win, NSWindow *nsw)
+{
+  // Raw pointers only: once a window is torn down (see the
+  // NSWindowWillCloseNotification observer below) we drop it from
+  // these sets immediately, so a later NSWindow allocated at the same
+  // address (common with allocator reuse across reconnects) is never
+  // mistaken for one we're already observing.
+  static std::set<NSWindow*> observed;
+  if (observed.count(nsw))
+    return;
+  observed.insert(nsw);
+
+  NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+
+  // Blocks must not capture nsw strongly: this file is built without
+  // ARC, but a block copied for long-term storage (as
+  // addObserverForName:usingBlock: does) still retains any captured
+  // Objective-C object pointer unless it's qualified unretained. A
+  // strong capture here would keep every NSWindow alive forever,
+  // leaking one per connection. We never message unsafeNsw, only use
+  // it as a set key, so there's no dangling-pointer risk.
+  __unsafe_unretained NSWindow *unsafeNsw = nsw;
+
+  void (^begin)(NSNotification*) = ^(NSNotification*) {
+    fullscreenTransitioning.insert(unsafeNsw);
+  };
+  // FLTK has no idea we just entered/left fullscreen behind its back
+  // (fullscreen_active() is a plain flag toggled by its own software
+  // fullscreen() / fullscreen_off()), so bring it up to date here and
+  // replay the FL_FULLSCREEN event it would normally have sent, since
+  // the rest of DesktopWindow (keyboard grab, overlay tip, scrollbar
+  // layout) keys off of that.
+  void (^entered)(NSNotification*) = ^(NSNotification*) {
+    fullscreenTransitioning.erase(unsafeNsw);
+    win->_set_fullscreen();
+    win->handle(FL_FULLSCREEN);
+  };
+  void (^exited)(NSNotification*) = ^(NSNotification*) {
+    fullscreenTransitioning.erase(unsafeNsw);
+    win->_clear_fullscreen();
+    win->handle(FL_FULLSCREEN);
+  };
+
+  [center addObserverForName:NSWindowWillEnterFullScreenNotification
+                       object:nsw queue:nil usingBlock:begin];
+  [center addObserverForName:NSWindowWillExitFullScreenNotification
+                       object:nsw queue:nil usingBlock:begin];
+  [center addObserverForName:NSWindowDidEnterFullScreenNotification
+                       object:nsw queue:nil usingBlock:entered];
+  [center addObserverForName:NSWindowDidExitFullScreenNotification
+                       object:nsw queue:nil usingBlock:exited];
+  // NSWindowDelegate has windowDidFailToEnter/ExitFullScreen: callbacks,
+  // but no equivalent notification-center broadcasts, and we can't
+  // become the delegate without clobbering FLTK's own. As a safety net
+  // against a failed transition leaving a window stuck forever, clear
+  // the flag unconditionally a bit after any transition should have
+  // finished (macOS animates this in well under a second).
+  void (^safetyClear)(NSNotification*) = ^(NSNotification*) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+      fullscreenTransitioning.erase(unsafeNsw);
+    });
+  };
+  [center addObserverForName:NSWindowWillEnterFullScreenNotification
+                       object:nsw queue:nil usingBlock:safetyClear];
+  [center addObserverForName:NSWindowWillExitFullScreenNotification
+                       object:nsw queue:nil usingBlock:safetyClear];
+
+  [center addObserverForName:NSWindowWillCloseNotification
+                       object:nsw queue:nil usingBlock:^(NSNotification*) {
+    fullscreenTransitioning.erase(unsafeNsw);
+    observed.erase(unsafeNsw);
+  }];
+}
+
 void cocoa_prevent_native_fullscreen(Fl_Window *win)
 {
   NSWindow *nsw;
@@ -41,6 +127,49 @@ void cocoa_prevent_native_fullscreen(Fl_Window *win)
   assert(nsw);
 #if MAC_OS_X_VERSION_MAX_ALLOWED >= 100700
   nsw.collectionBehavior |= NSWindowCollectionBehaviorFullScreenNone;
+#endif
+}
+
+void cocoa_enable_native_fullscreen(Fl_Window *win)
+{
+  NSWindow *nsw;
+  nsw = (NSWindow*)fl_xid(win);
+  assert(nsw);
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 100700
+  nsw.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+#endif
+}
+
+void cocoa_toggle_native_fullscreen(Fl_Window *win)
+{
+  NSWindow *nsw;
+  nsw = (NSWindow*)fl_xid(win);
+  assert(nsw);
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 100700
+  // Ensure the window supports native fullscreen
+  nsw.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+
+  cocoaTrackFullscreenTransitions(win, nsw);
+
+  // Calling toggleFullScreen: again while a previous transition is
+  // still animating confuses AppKit and can hang the application, so
+  // ignore repeat requests until the current transition completes.
+  if (fullscreenTransitioning.count(nsw))
+    return;
+
+  [nsw toggleFullScreen:nil];
+#endif
+}
+
+bool cocoa_is_native_fullscreen(Fl_Window *win)
+{
+  NSWindow *nsw;
+  nsw = (NSWindow*)fl_xid(win);
+  assert(nsw);
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 100700
+  return (nsw.styleMask & NSFullScreenWindowMask) != 0;
+#else
+  return false;
 #endif
 }
 
